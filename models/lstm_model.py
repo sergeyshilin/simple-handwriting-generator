@@ -43,6 +43,9 @@ def LstmModel():
         self.x = tf.placeholder(np.float32,
             shape=(None, None, timesteps, n_input), name="input")
 
+        self.y_pred = tf.placeholder(tf.float32, (None, None, self.n_output))
+        self.y_pred_label = tf.reshape(self.y_batch, [-1, self.n_output])
+
         # RNN output node weights and biases
         self.weights = tf.Variable(tf.random_normal([n_hidden, n_output]))
         self.biases = tf.Variable(tf.random_normal([n_output]))
@@ -52,7 +55,6 @@ def LstmModel():
 
         self.xtr, self.ytr, self.xval, self.yval = load_data(timesteps=timesteps,
             validation_split=0.1)
-
 
 
 
@@ -66,7 +68,7 @@ def LstmModel():
 
 
     def __generate_next_batch(self):
-        
+
 
 
     def train(self):
@@ -74,6 +76,13 @@ def LstmModel():
 
         while True:
             x_batch, y_batch = self.__generate_next_batch()
+
+            loss_op = tf.reduce_mean(f.nn.softmax_cross_entropy_with_logits(
+                logits=self.rnn_layer,
+                labels=self.y_pred_label))
+
+            _, loss = self.session.run([self.optimizer, loss_op],
+                feed_dict={self.x: x_batch, self.y: y_batch})
 
             if current_step == self.training_steps:
                 break
