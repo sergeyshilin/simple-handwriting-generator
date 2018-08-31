@@ -1,5 +1,6 @@
 import sys
 import numpy as np
+import time
 
 import tensorflow as tf
 from tensorflow.contrib import rnn
@@ -46,7 +47,7 @@ class LstmModel:
 
         # The amount of sequences fed to the network while training
         self.training_steps = 1000
-        self.batch_size = 2
+        self.batch_size = 128
         self.learning_rate = 1e-3
 
         self.sess = None # Init an empty TF session
@@ -59,7 +60,7 @@ class LstmModel:
         self.rnn = rnn
 
         self.xtr, self.xval, self.ytr, self.yval = load_data(timesteps=timesteps,
-            validation_split=0.1)
+            validation_split=0.05)
 
         self.__initialize_variables()
 
@@ -100,6 +101,7 @@ class LstmModel:
             self.optimizer = tf.train.RMSPropOptimizer(
                 learning_rate=self.learning_rate)
 
+            # Of course another function here, but this one just for testing the framework
             self.loss_op = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
                 logits=self.rnn_layer,
                 labels=self.y_pred_label))
@@ -127,18 +129,27 @@ class LstmModel:
     def train(self):
         current_step = 1
 
-        while True:
-            x_batch, y_batch = self.__generate_next_batch()
+        print ("Starting model training with batch size of {}...".format(
+                self.batch_size))
 
-            sys.stdout.write('\repoch %d starting... ' % current_step)
+        while True:
+            start_time = time.time()
+            x_batch, y_batch = self.__generate_next_batch()
 
             _, loss = self.sess.run([self.train_op, self.loss_op],
                 feed_dict={self.x: x_batch, self.y_pred: y_batch})
 
-            self.saver.save(self.sess, self.checkpoint)
+            iteration_time = int(time.time() - start_time)
 
-            sys.stdout.write('done!')
-            sys.stdout.flush()
+            print("iteration {:>4}: loss {:0.10f} time {:3d}s".format(
+                current_step, loss, iteration_time), end=" | ")
+
+            val_loss = self.sess.run(self.loss_op,
+                feed_dict={self.x: self.xval, self.y_pred: self.yval})
+
+            print("val_loss {:0.10f}".format(val_loss))
+
+            self.saver.save(self.sess, self.checkpoint)
 
             if current_step == self.training_steps:
                 break
