@@ -33,7 +33,8 @@ def load_data(timesteps=700, validation_split=0.3):
 
 class LstmModel:
 
-    def __init__(self, session, checkpoint, rnn, timesteps, n_input, n_hidden, n_output):
+    def __init__(self, checkpoint, rnn, timesteps, n_input,
+        n_hidden, n_output, scope_name="scope"):
         # Input:
         #   session - TensorFlow Session
         #   checkpoint - str
@@ -43,34 +44,67 @@ class LstmModel:
         #   n_hidden   - int
         #   n_output   - int
 
-        self.sess = session
-        self.checkpoint = checkpoint
-
         # The amount of sequences fed to the network while training
         self.training_steps = 1000
         self.batch_size = 2
         self.learning_rate = 1e-3
 
+        self.sess = None # Init an empty TF session
+        self.checkpoint = checkpoint
+        self.scope_name = scope_name
+        self.n_input = n_input
+        self.n_hidden = n_hidden
+        self.timesteps = timesteps
+        self.n_output = n_output
+        self.rnn = rnn
+
         self.xtr, self.xval, self.ytr, self.yval = load_data(timesteps=timesteps,
             validation_split=0.1)
 
-        with tf.variable_scope("some_scope_name"):
+        self.__initialize_variables()
+
+        with tf.device('/gpu:0'):
+            session_config = tf.ConfigProto(
+                allow_soft_placement = True,
+                log_device_placement = False,
+                gpu_options = tf.GPUOptions(
+                    allow_growth = True,
+                    # To avoid using the totality of the GPU memory
+                    per_process_gpu_memory_fraction = 0.7
+                )
+            )
+
+            with tf.Session(config=session_config) as tf_session:
+                self.sess = tf_session
+
+        self.sess.run(tf.global_variables_initializer())
+        # self.sess.run(tf.local_variables_initializer())
+        self.saver = tf.train.Saver(tf.global_variables())
+
+
+    def __initialize_variables(self):
+        with tf.variable_scope(self.scope_name):
+            # Input placeholder
+            self.x = tf.placeholder(np.float32, shape=(None, None, self.n_input))
+            self.y_pred = tf.placeholder(tf.float32, (None, None, self.n_output))
+            self.y_pred_label = tf.reshape(self.y_pred, [-1, self.n_output])
+
+            # RNN output node weights and biases
+            self.weights = tf.Variable(tf.random_normal([self.n_hidden, self.n_output]))
+            self.biases = tf.Variable(tf.random_normal([self.n_output]))
+
+            self.rnn_layer = self.rnn(self.x, self.weights, self.biases,
+                self.timesteps, self.n_input, self.n_hidden, self.n_output,
+                scope_name=self.scope_name)
+
             self.optimizer = tf.train.RMSPropOptimizer(
                 learning_rate=self.learning_rate)
 
-            # Input placeholder
-            self.x = tf.placeholder(np.float32,
-                shape=(None, None, n_input), name="input")
+            self.loss_op = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
+                logits=self.rnn_layer,
+                labels=self.y_pred_label))
 
-            self.y_pred = tf.placeholder(tf.float32, (None, None, n_output))
-            self.y_pred_label = tf.reshape(self.y_pred, [-1, n_output])
-
-            # RNN output node weights and biases
-            self.weights = tf.Variable(tf.random_normal([n_hidden, n_output]))
-            self.biases = tf.Variable(tf.random_normal([n_output]))
-
-            self.rnn_layer = rnn(self.x, self.weights, self.biases, timesteps,
-                n_input, n_hidden, n_output)
+            self.train_op = self.optimizer.minimize(self.loss_op)
 
 
     def __does_checkpoint_exist(self, checkpoint):
@@ -96,16 +130,12 @@ class LstmModel:
         while True:
             x_batch, y_batch = self.__generate_next_batch()
 
-            loss_op = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
-                logits=self.rnn_layer,
-                labels=self.y_pred_label))
-
-            train_op = self.optimizer.minimize(loss_op)
-
             sys.stdout.write('\repoch %d starting... ' % current_step)
 
-            _, loss = self.sess.run([train_op, loss_op],
+            _, loss = self.sess.run([self.train_op, self.loss_op],
                 feed_dict={self.x: x_batch, self.y_pred: y_batch})
+
+            self.saver.save(self.sess, self.checkpoint)
 
             sys.stdout.write('done!')
             sys.stdout.flush()
@@ -119,24 +149,27 @@ class LstmModel:
 
 
     def sample(self):
-        if not __does_checkpoint_exist(checkpoint):
-            # Create the checkpoint first of all
-            train()
+        if not __does_checkpoint_exist(self.checkpoint):
+            # Create the checkpoint first of all or raise an exception
+            pass
+        else:
+            self.saver.restore(self.sess, self.checkpoint)
 
 
 def get_unconditional_rnn(x, weights, biases, timesteps=700, n_input=3,
-                          n_hidden=400, n_output=3):
+                          n_hidden=400, n_output=3, scope_name="scope"):
 
-    x = tf.reshape(x, [-1, n_input])
+    with tf.variable_scope(scope_name):
+        x = tf.reshape(x, [-1, n_input])
 
-    # # Generate a n_input-element sequence of inputs
-    x = tf.split(x, n_input, 1)
+        # # Generate a n_input-element sequence of inputs
+        x = tf.split(x, n_input, 1)
 
-    # 1-layer LSTM with n_hidden units.
-    rnn_cell = rnn.BasicLSTMCell(n_hidden)
+        # 1-layer LSTM with n_hidden units.
+        rnn_cell = rnn.BasicLSTMCell(n_hidden)
 
-    # generate prediction
-    outputs, states = rnn.static_rnn(rnn_cell, x, dtype=tf.float32)
+        # generate prediction
+        outputs, states = rnn.static_rnn(rnn_cell, x, dtype=tf.float32)
 
     return tf.matmul(outputs[-1], weights) + biases
 
@@ -165,26 +198,12 @@ def generate_unconditionally(random_seed=1):
     # we will not get rid of any stroke
     timesteps = np.min([len(x) for x in strokes]) - timesteps_output
 
-    with tf.device('/gpu:0'):
-            # To avoid using the totality of the GPU memory
-            session_config = tf.ConfigProto(
-                allow_soft_placement = True,
-                log_device_placement = False,
-                gpu_options = tf.GPUOptions(
-                    allow_growth = True,
-                    per_process_gpu_memory_fraction = 0.7
-                )
-            )
+    model = LstmModel(checkpoint, get_unconditional_rnn, timesteps,
+        n_input, n_hidden, n_output, scope_name="lstm_unconditional")
 
-            with tf.Session(config=session_config) as sess:
-                sess.run(tf.global_variables_initializer())
+    model.train()
 
-                model = LstmModel(sess, checkpoint, get_unconditional_rnn, timesteps,
-                    n_input, n_hidden, n_output)
-
-                model.train()
-
-    return stroke
+    return None
 
 
 def generate_conditionally(text='welcome to lyrebird', random_seed=1):
