@@ -1,6 +1,7 @@
 import sys
 import numpy as np
 import time
+from tqdm import tqdm
 
 import tensorflow as tf
 from tensorflow.contrib import rnn
@@ -15,21 +16,46 @@ with open('../data/sentences.txt') as f:
 # <<< Read global data
 
 
-def load_data(timesteps=700, validation_split=0.3):
+def load_data_predict(timesteps=700, max_samples_per_stroke=200, validation_split=0.3):
     # Input:
     #   timesteps - int
     #   validation_split - float
 
-    # TODO: iterate through timesteps, too
+    max_generated_strokes = np.sum(
+        [min(len(stroke) - timesteps, max_samples_per_stroke) for stroke in strokes])
 
-    X_data = np.zeros(shape=(len(strokes), timesteps, 3), dtype=np.float32)
-    y_data = np.zeros(shape=(len(strokes), timesteps, 3), dtype=np.float32)
+    X_data = np.zeros(shape=(max_generated_strokes, timesteps, 3), dtype=np.float32)
+    y_data = np.zeros(shape=(max_generated_strokes, timesteps, 3), dtype=np.float32)
 
-    for i, stroke in enumerate(strokes):
-        X_data[i] = stroke[:timesteps]
-        y_data[i] = stroke[1 : timesteps + 1]
+    current_timestep = 0
+
+    for stroke in tqdm(strokes):
+        if timesteps > len(stroke):
+            continue
+
+        possible_ids_num = len(stroke) - timesteps
+        selected_ids_num = min(possible_ids_num, max_samples_per_stroke)
+        selected_ids = np.random.permutation(possible_ids_num)[:selected_ids_num]
+
+        for stroke_position in selected_ids:
+            X_data[current_timestep] = \
+                stroke[stroke_position : timesteps + stroke_position]
+            # shift to 1 timestep forward
+            y_data[current_timestep] = \
+                stroke[stroke_position + 1 : timesteps + stroke_position + 1]
+            current_timestep += 1
 
     return train_test_split(X_data, y_data, test_size=validation_split)
+
+
+def load_data_recognize(timesteps=700, validation_split=0.3):
+    # Input:
+    #   timesteps - int
+    #   validation_split - float
+
+    # The function to read strokes and predtct text
+
+    return None
 
 
 class LstmModel:
@@ -59,28 +85,26 @@ class LstmModel:
         self.n_output = n_output
         self.rnn = rnn
 
-        self.xtr, self.xval, self.ytr, self.yval = load_data(timesteps=timesteps,
-            validation_split=0.05)
-
         self.__initialize_variables()
 
-        with tf.device('/gpu:0'):
-            session_config = tf.ConfigProto(
-                allow_soft_placement = True,
-                log_device_placement = False,
-                gpu_options = tf.GPUOptions(
-                    allow_growth = True,
-                    # To avoid using the totality of the GPU memory
-                    per_process_gpu_memory_fraction = 0.7
-                )
+        session_config = tf.ConfigProto(
+            allow_soft_placement = True,
+            gpu_options = tf.GPUOptions(
+                allow_growth = True,
+                # To avoid using the totality of the GPU memory
+                per_process_gpu_memory_fraction = 0.7
             )
+        )
 
-            with tf.Session(config=session_config) as tf_session:
-                self.sess = tf_session
+        self.sess = tf.Session(config=session_config)
 
         self.sess.run(tf.global_variables_initializer())
         # self.sess.run(tf.local_variables_initializer())
         self.saver = tf.train.Saver(tf.global_variables())
+
+
+    def __del__(self):
+        self.sess.close()
 
 
     def __initialize_variables(self):
@@ -118,23 +142,27 @@ class LstmModel:
         return False
 
 
-    def __generate_next_batch(self):
+    def __generate_next_batch(self, X_data, y_data):
 
         # TODO: redesign for more randomness (obviously)
-        random_idx = np.random.randint(0, len(self.xtr) - self.batch_size)
-        return self.xtr[random_idx : random_idx + self.batch_size], \
-            self.ytr[random_idx : random_idx + self.batch_size]
+        random_idx = np.random.randint(0, len(X_data) - self.batch_size)
+        return X_data[random_idx : random_idx + self.batch_size], \
+            y_data[random_idx : random_idx + self.batch_size]
 
 
-    def train(self):
+    def train(self, data_loader):
         current_step = 1
 
-        print ("Starting model training with batch size of {}...".format(
+        print("Loading training and validation data...")
+        xtr, xval, ytr, yval = data_loader(timesteps=self.timesteps,
+            max_samples_per_stroke=25, validation_split=0.05)
+
+        print("Starting model training with batch size of {}...".format(
                 self.batch_size))
 
         while True:
             start_time = time.time()
-            x_batch, y_batch = self.__generate_next_batch()
+            x_batch, y_batch = self.__generate_next_batch(xtr, ytr)
 
             _, loss = self.sess.run([self.train_op, self.loss_op],
                 feed_dict={self.x: x_batch, self.y_pred: y_batch})
@@ -145,7 +173,7 @@ class LstmModel:
                 current_step, loss, iteration_time), end=" | ")
 
             val_loss = self.sess.run(self.loss_op,
-                feed_dict={self.x: self.xval, self.y_pred: self.yval})
+                feed_dict={self.x: xval, self.y_pred: yval})
 
             print("val_loss {:0.10f}".format(val_loss))
 
@@ -212,7 +240,7 @@ def generate_unconditionally(random_seed=1):
     model = LstmModel(checkpoint, get_unconditional_rnn, timesteps,
         n_input, n_hidden, n_output, scope_name="lstm_unconditional")
 
-    model.train()
+    model.train(load_data_predict)
 
     return None
 
