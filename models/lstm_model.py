@@ -16,10 +16,10 @@ with open('../data/sentences.txt') as f:
 # <<< Read global data
 
 
-def load_data_predict(timesteps=700, max_samples_per_stroke=200, validation_split=0.3):
+def load_data_predict(timesteps=700, max_samples_per_stroke=200, validation_size=0.3):
     # Input:
     #   timesteps - int
-    #   validation_split - float
+    #   validation_size - float or int
 
     max_generated_strokes = np.sum(
         [min(len(stroke) - timesteps, max_samples_per_stroke) for stroke in strokes])
@@ -45,10 +45,12 @@ def load_data_predict(timesteps=700, max_samples_per_stroke=200, validation_spli
                 stroke[stroke_position + 1 : timesteps + stroke_position + 1]
             current_timestep += 1
 
-    return train_test_split(X_data, y_data, test_size=validation_split)
+    # TODO: normalize [x, y] to mean=0, stddev=1
+
+    return train_test_split(X_data, y_data, test_size=validation_size)
 
 
-def load_data_recognize(timesteps=700, validation_split=0.3):
+def load_data_recognize(timesteps=700, validation_size=0.3):
     # Input:
     #   timesteps - int
     #   validation_split - float
@@ -60,7 +62,7 @@ def load_data_recognize(timesteps=700, validation_split=0.3):
 
 class LstmModel:
 
-    def __init__(self, checkpoint, rnn, timesteps, n_input,
+    def __init__(self, checkpoint, timesteps, n_input,
         n_hidden, n_output, scope_name="scope"):
         # Input:
         #   session - TensorFlow Session
@@ -75,6 +77,8 @@ class LstmModel:
         self.training_steps = 1000
         self.batch_size = 128
         self.learning_rate = 1e-3
+        self.weigths_stddev = 0.075
+        self.mixtures = 20
 
         self.sess = None # Init an empty TF session
         self.checkpoint = checkpoint
@@ -83,7 +87,6 @@ class LstmModel:
         self.n_hidden = n_hidden
         self.timesteps = timesteps
         self.n_output = n_output
-        self.rnn = rnn
 
         self.__initialize_variables()
 
@@ -115,22 +118,97 @@ class LstmModel:
             self.y_pred_label = tf.reshape(self.y_pred, [-1, self.n_output])
 
             # RNN output node weights and biases
-            self.weights = tf.Variable(tf.random_normal([self.n_hidden, self.n_output]))
+            self.weights = tf.Variable(tf.random_normal([self.n_hidden, self.n_output], 
+                stddev=self.weigths_stddev))
             self.biases = tf.Variable(tf.random_normal([self.n_output]))
 
-            self.rnn_layer = self.rnn(self.x, self.weights, self.biases,
-                self.timesteps, self.n_input, self.n_hidden, self.n_output,
-                scope_name=self.scope_name)
+            self.rnn_layer = self.__get_rnn_layer(self.x, self.weights, self.biases)
+            self.mdn_layer = self.__get_mixture_density_outputs(self.rnn_layer)
+            self.loss_op = self.__get_loss(self.mdn_layer)
 
             self.optimizer = tf.train.RMSPropOptimizer(
                 learning_rate=self.learning_rate)
 
-            # Of course another function here, but this one just for testing the framework
-            self.loss_op = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(
-                logits=self.rnn_layer,
-                labels=self.y_pred_label))
-
             self.train_op = self.optimizer.minimize(self.loss_op)
+
+
+    def __get_rnn_layer(self, inputs, weights, biases):
+
+        with tf.variable_scope(self.scope_name):
+            rnn_x = tf.reshape(inputs, [-1, self.n_input])
+
+            # # Generate a n_input-element sequence of inputs
+            rnn_x = tf.split(rnn_x, self.n_input, 1)
+
+            # 1-layer LSTM with n_hidden units.
+            rnn_cell = rnn.BasicLSTMCell(self.n_hidden)
+
+            # generate prediction
+            outputs, states = rnn.static_rnn(rnn_cell, rnn_x, dtype=tf.float32)
+
+            return tf.matmul(outputs[-1], weights) + biases
+
+
+    def __get_mixture_density_outputs(self, inputs):
+
+        with tf.variable_scope(self.scope_name):
+            e = tf.layers.dense(inputs, 1,
+                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
+            pi = tf.layers.dense(inputs, self.mixtures,
+                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
+
+            mean1 = tf.layers.dense(inputs, self.mixtures,
+                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
+            mean2 = tf.layers.dense(inputs, self.mixtures,
+                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
+
+            std1 = tf.layers.dense(inputs, self.mixtures,
+                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
+            std2 = tf.layers.dense(inputs, self.mixtures,
+                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
+
+            rho = tf.layers.dense(inputs, self.mixtures,
+                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
+
+            e_out = tf.sigmoid(-e)
+            pi_out = tf.nn.softmax(pi)
+            std1_out = tf.exp(std1)
+            std2_out = tf.exp(std2)
+            rho_out = tf.tanh(rho)
+
+            return e_out, pi_out, mean1, mean2, std1_out, std2_out, rho_out
+
+
+    def __get_loss(self, mdn_layer):
+
+        eps = 1e-7
+
+        e, pi, mean1, mean2, std1, std2, rho = mdn_layer
+
+        with tf.variable_scope(self.scope_name):
+            x_coords, y_coords, stop_flags = \
+                tf.unstack(tf.expand_dims(self.y_pred_label, axis=2), axis=1)
+
+            x_standardized = (x_coords - mean1) / std1
+            y_standardized = (y_coords - mean2) / std2
+
+            z = tf.square(x_standardized) + tf.square(x_standardized) - \
+                2.0 * rho * x_standardized * y_standardized
+
+            rho_processed = 1 - tf.square(rho)
+
+            n = 1.0 / (2 * np.pi * std1 * std2 * tf.sqrt(rho_processed)) * \
+                tf.exp(-z / (2 * rho_processed))
+
+            reduct_sum_pi_n = tf.reduce_sum(pi * n, axis=1)
+
+            e_conditional = tf.multiply(stop_flags, e) + \
+                tf.multiply(1. - stop_flags, 1. - e)
+
+            loss = tf.reduce_mean(-tf.log(tf.maximum(reduct_sum_pi_n, eps)) - \
+                tf.log(tf.maximum(e_conditional, eps)))
+
+            return loss
 
 
     def __does_checkpoint_exist(self, checkpoint):
@@ -155,7 +233,7 @@ class LstmModel:
 
         print("Loading training and validation data...")
         xtr, xval, ytr, yval = data_loader(timesteps=self.timesteps,
-            max_samples_per_stroke=25, validation_split=0.05)
+            max_samples_per_stroke=25, validation_size=200)
 
         print("Starting model training with batch size of {}...".format(
                 self.batch_size))
@@ -195,25 +273,6 @@ class LstmModel:
             self.saver.restore(self.sess, self.checkpoint)
 
 
-def get_unconditional_rnn(x, weights, biases, timesteps=700, n_input=3,
-                          n_hidden=400, n_output=3, scope_name="scope"):
-
-    with tf.variable_scope(scope_name):
-        x = tf.reshape(x, [-1, n_input])
-
-        # # Generate a n_input-element sequence of inputs
-        x = tf.split(x, n_input, 1)
-
-        # 1-layer LSTM with n_hidden units.
-        rnn_cell = rnn.BasicLSTMCell(n_hidden)
-
-        # generate prediction
-        outputs, states = rnn.static_rnn(rnn_cell, x, dtype=tf.float32)
-
-    return tf.matmul(outputs[-1], weights) + biases
-
-
-
 def generate_unconditionally(random_seed=1):
     # Input:
     #   random_seed - integer
@@ -226,7 +285,7 @@ def generate_unconditionally(random_seed=1):
     # We use a single LSTM layer with 900 hidden cells 
     n_hidden = 900
 
-    # Input shape: (stop_sign, x, y)
+    # Input shape: (x, y, stop_sign)
     n_input = 3
     n_output = n_input
 
@@ -237,7 +296,7 @@ def generate_unconditionally(random_seed=1):
     # we will not get rid of any stroke
     timesteps = np.min([len(x) for x in strokes]) - timesteps_output
 
-    model = LstmModel(checkpoint, get_unconditional_rnn, timesteps,
+    model = LstmModel(checkpoint, timesteps,
         n_input, n_hidden, n_output, scope_name="lstm_unconditional")
 
     model.train(load_data_predict)
