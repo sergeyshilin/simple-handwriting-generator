@@ -74,8 +74,8 @@ class LstmModel:
         #   n_output   - int
 
         # The amount of sequences fed to the network while training
-        self.training_steps = 1000
-        self.batch_size = 128
+        self.training_steps = 10000
+        self.batch_size = 64
         self.learning_rate = 1e-3
         self.weigths_stddev = 0.075
         self.mixtures = 20
@@ -231,13 +231,13 @@ class LstmModel:
     def train(self, data_loader):
         current_step = 1
         loss_decreases_num = 0
-        validation_step = 10
-        validation_best_steps = 2
+        validation_step = 100
+        validation_best_steps = 10
         best_validation_loss = np.inf
 
         print("Loading training and validation data...")
         xtr, xval, ytr, yval = data_loader(timesteps=self.timesteps,
-            max_samples_per_stroke=25, validation_size=200)
+            max_samples_per_stroke=25, validation_size=self.batch_size)
 
         print("Starting model training with batch size of {}...".format(
                 self.batch_size))
@@ -267,7 +267,7 @@ class LstmModel:
                 else:
                     loss_decreases_num += 1
 
-            if current_step == self.training_steps or 
+            if current_step == self.training_steps or \
                     loss_decreases_num == validation_best_steps:
                 break
             else:
