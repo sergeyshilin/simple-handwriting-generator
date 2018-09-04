@@ -83,6 +83,7 @@ class LstmModel:
         self.learning_rate = 1e-4
         self.optimizer_decay = 0.95
         self.optimizer_momentum = 0.9
+        self.gradients_clip = 10
 
         self.sess = None # Init an empty TF session
         self.checkpoint = checkpoint
@@ -140,7 +141,13 @@ class LstmModel:
                 decay=self.optimizer_decay,
                 momentum=self.optimizer_momentum)
 
-            self.train_op = self.optimizer.minimize(self.loss_op)
+            training_vars = tf.trainable_variables()
+            gradients, _ = \
+                tf.clip_by_global_norm(tf.gradients(self.loss_op, training_vars),
+                    self.gradients_clip)
+
+            self.train_op = \
+                self.optimizer.apply_gradients(zip(gradients, training_vars))
 
 
     def __get_rnn_layer(self, inputs, weights, biases):
