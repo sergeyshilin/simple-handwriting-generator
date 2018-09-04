@@ -76,9 +76,13 @@ class LstmModel:
         # The amount of sequences fed to the network while training
         self.training_steps = 10000
         self.batch_size = 64
-        self.learning_rate = 1e-3
         self.weigths_stddev = 0.075
+        self.weights_mean = 0
         self.mixtures = 20
+
+        self.learning_rate = 1e-4
+        self.optimizer_decay = 0.95
+        self.optimizer_momentum = 0.9
 
         self.sess = None # Init an empty TF session
         self.checkpoint = checkpoint
@@ -86,7 +90,8 @@ class LstmModel:
         self.n_input = n_input
         self.n_hidden = n_hidden
         self.timesteps = timesteps
-        self.n_output = n_output
+        # pi, mean1, mean2, std1, std2, rho + "end of stroke"
+        self.n_output = self.mixtures * 6 + 1
 
         self.__initialize_variables()
 
@@ -114,20 +119,26 @@ class LstmModel:
         with tf.variable_scope(self.scope_name):
             # Input placeholder
             self.x = tf.placeholder(np.float32, shape=(None, None, self.n_input))
-            self.y_pred = tf.placeholder(tf.float32, (None, None, self.n_output))
-            self.y_pred_label = tf.reshape(self.y_pred, [-1, self.n_output])
+            self.y_pred = tf.placeholder(tf.float32, (None, None, self.n_input))
+            self.y_pred_label = tf.reshape(self.y_pred, [-1, self.n_input])
 
             # RNN output node weights and biases
-            self.weights = tf.Variable(tf.random_normal([self.n_hidden, self.n_output], 
+            self.weights = tf.Variable(tf.random_normal(
+                [self.n_hidden, self.n_output],
+                mean=self.weights_mean,
                 stddev=self.weigths_stddev))
-            self.biases = tf.Variable(tf.random_normal([self.n_output]))
+
+            self.biases = tf.Variable(tf.random_normal([self.n_output],
+                mean=self.weights_mean, stddev=self.weigths_stddev))
 
             self.rnn_layer = self.__get_rnn_layer(self.x, self.weights, self.biases)
             self.mdn_layer = self.__get_mixture_density_outputs(self.rnn_layer)
             self.loss_op = self.__get_loss(self.mdn_layer)
 
             self.optimizer = tf.train.RMSPropOptimizer(
-                learning_rate=self.learning_rate)
+                learning_rate=self.learning_rate,
+                decay=self.optimizer_decay,
+                momentum=self.optimizer_momentum)
 
             self.train_op = self.optimizer.minimize(self.loss_op)
 
@@ -135,10 +146,10 @@ class LstmModel:
     def __get_rnn_layer(self, inputs, weights, biases):
 
         with tf.variable_scope(self.scope_name):
-            rnn_x = tf.reshape(inputs, [-1, self.n_input])
-
-            # # Generate a n_input-element sequence of inputs
-            rnn_x = tf.split(rnn_x, self.n_input, 1)
+            rnn_x = [
+                tf.squeeze(input_, [1]) \
+                    for input_ in tf.split(inputs, self.timesteps, 1)
+            ]
 
             # 1-layer LSTM with n_hidden units.
             rnn_cell = rnn.BasicLSTMCell(self.n_hidden)
@@ -146,29 +157,16 @@ class LstmModel:
             # generate prediction
             outputs, states = rnn.static_rnn(rnn_cell, rnn_x, dtype=tf.float32)
 
-            return tf.matmul(outputs[-1], weights) + biases
+            rnn_out = tf.reshape(tf.concat(outputs, 1), [-1, self.n_hidden])
+
+            return tf.matmul(rnn_out, weights) + biases
 
 
     def __get_mixture_density_outputs(self, inputs):
 
         with tf.variable_scope(self.scope_name):
-            e = tf.layers.dense(inputs, 1,
-                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
-            pi = tf.layers.dense(inputs, self.mixtures,
-                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
-
-            mean1 = tf.layers.dense(inputs, self.mixtures,
-                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
-            mean2 = tf.layers.dense(inputs, self.mixtures,
-                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
-
-            std1 = tf.layers.dense(inputs, self.mixtures,
-                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
-            std2 = tf.layers.dense(inputs, self.mixtures,
-                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
-
-            rho = tf.layers.dense(inputs, self.mixtures,
-                kernel_initializer=tf.random_normal_initializer(stddev=0.075))
+            pi, mean1, mean2, std1, std2, rho = tf.split(inputs[:, :-1], 6, 1)
+            e = inputs[:, -1:]
 
             e_out = tf.sigmoid(-e)
             pi_out = tf.nn.softmax(pi)
@@ -181,29 +179,34 @@ class LstmModel:
 
     def __get_loss(self, mdn_layer):
 
-        eps = 1e-7
+        eps = 1e-10
 
-        e, pi, mean1, mean2, std1, std2, rho = mdn_layer
+        self.e, self.pi, self.mean1, self.mean2, self.std1, self.std2, self.rho = \
+            mdn_layer
 
         with tf.variable_scope(self.scope_name):
-            x_coords, y_coords, stop_flags = \
-                tf.unstack(tf.expand_dims(self.y_pred_label, axis=2), axis=1)
+            x_coords, y_coords, stop_flags = tf.split(self.y_pred_label, 3, 1)
 
-            x_standardized = (x_coords - mean1) / std1
-            y_standardized = (y_coords - mean2) / std2
+            x_no_mean = tf.subtract(x_coords, self.mean1)
+            y_no_mean = tf.subtract(y_coords, self.mean2)
+            x_standardized = tf.div(x_no_mean, self.std1)
+            y_standardized = tf.div(y_no_mean, self.std2)
 
-            z = tf.square(x_standardized) + tf.square(x_standardized) - \
-                2.0 * rho * x_standardized * y_standardized
+            z = tf.square(x_standardized) + tf.square(y_standardized) - \
+                tf.div(2.0 * tf.multiply(self.rho, tf.multiply(x_no_mean, y_no_mean)), \
+                tf.multiply(self.std1, self.std2))
 
-            rho_processed = 1 - tf.square(rho)
+            rho_processed = 1.0 - tf.square(self.rho)
 
-            n = 1.0 / (2 * np.pi * std1 * std2 * tf.sqrt(rho_processed)) * \
-                tf.exp(-z / (2 * rho_processed))
+            n = tf.div(tf.exp(tf.div(-z, 2.0 * rho_processed)),
+                2.0 * np.pi * tf.multiply(tf.multiply(self.std1, self.std2),
+                    tf.sqrt(rho_processed)))
 
-            reduct_sum_pi_n = tf.reduce_sum(pi * n, axis=1)
+            reduct_sum_pi_n = tf.reduce_sum(tf.multiply(self.pi, n), axis=1,
+                keep_dims=True)
 
-            e_conditional = tf.multiply(stop_flags, e) + \
-                tf.multiply(1. - stop_flags, 1. - e)
+            e_conditional = tf.multiply(stop_flags, self.e) + \
+                tf.multiply(1.0 - stop_flags, 1.0 - self.e)
 
             loss = tf.reduce_mean(-tf.log(tf.maximum(reduct_sum_pi_n, eps)) - \
                 tf.log(tf.maximum(e_conditional, eps)))
@@ -311,9 +314,9 @@ def generate_unconditionally(random_seed=1):
     model = LstmModel(checkpoint, timesteps,
         n_input, n_hidden, n_output, scope_name="lstm_unconditional")
 
-    model.sample()
+    # model.sample()
 
-    # model.train(load_data_predict)
+    model.train(load_data_predict)
 
     return None
 
