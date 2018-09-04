@@ -230,6 +230,10 @@ class LstmModel:
 
     def train(self, data_loader):
         current_step = 1
+        loss_decreases_num = 0
+        validation_step = 10
+        validation_best_steps = 2
+        best_validation_loss = np.inf
 
         print("Loading training and validation data...")
         xtr, xval, ytr, yval = data_loader(timesteps=self.timesteps,
@@ -248,29 +252,37 @@ class LstmModel:
             iteration_time = int(time.time() - start_time)
 
             print("iteration {:>4}: loss {:0.10f} time {:3d}s".format(
-                current_step, loss, iteration_time), end=" | ")
+                current_step, loss, iteration_time))
 
-            val_loss = self.sess.run(self.loss_op,
-                feed_dict={self.x: xval, self.y_pred: yval})
+            if current_step % validation_step == 0:
+                val_loss = self.sess.run(self.loss_op,
+                    feed_dict={self.x: xval, self.y_pred: yval})
 
-            print("val_loss {:0.10f}".format(val_loss))
+                print("val_loss {:0.10f}".format(val_loss))
 
-            self.saver.save(self.sess, self.checkpoint)
+                if val_loss < best_validation_loss:
+                    best_validation_loss = val_loss
+                    loss_decreases_num = 0
+                    self.saver.save(self.sess, self.checkpoint)
+                else:
+                    loss_decreases_num += 1
 
-            if current_step == self.training_steps:
+            if current_step == self.training_steps or 
+                    loss_decreases_num == validation_best_steps:
                 break
             else:
                 current_step += 1
 
-            # prediction = tf.nn.softmax(logits)
-
 
     def sample(self):
-        if not __does_checkpoint_exist(self.checkpoint):
-            # Create the checkpoint first of all or raise an exception
-            pass
-        else:
-            self.saver.restore(self.sess, self.checkpoint)
+        # if not __does_checkpoint_exist(self.checkpoint):
+        #     # Create the checkpoint first of all or raise an exception
+        #     pass
+        # else:
+
+        self.saver.restore(self.sess, self.checkpoint)
+
+        starting_step = np.array([0., 0., 1.])
 
 
 def generate_unconditionally(random_seed=1):
@@ -299,7 +311,9 @@ def generate_unconditionally(random_seed=1):
     model = LstmModel(checkpoint, timesteps,
         n_input, n_hidden, n_output, scope_name="lstm_unconditional")
 
-    model.train(load_data_predict)
+    model.sample()
+
+    # model.train(load_data_predict)
 
     return None
 
