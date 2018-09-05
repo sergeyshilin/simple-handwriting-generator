@@ -8,7 +8,6 @@ from tensorflow.contrib import rnn
 
 from sklearn.model_selection import train_test_split
 
-
 # >>> Read global data
 strokes = np.load('../data/strokes.npy', encoding='bytes')
 with open('../data/sentences.txt') as f:
@@ -16,16 +15,22 @@ with open('../data/sentences.txt') as f:
 # <<< Read global data
 
 
-def load_data_predict(timesteps=700, max_samples_per_stroke=200, validation_size=0.3):
+def load_data_predict(timesteps=700,
+                      max_samples_per_stroke=200,
+                      validation_size=0.3):
     # Input:
     #   timesteps - int
     #   validation_size - float or int
 
-    max_generated_strokes = np.sum(
-        [min(len(stroke) - timesteps, max_samples_per_stroke) for stroke in strokes])
+    max_generated_strokes = np.sum([
+        min(len(stroke) - timesteps, max_samples_per_stroke)
+        for stroke in strokes
+    ])
 
-    X_data = np.zeros(shape=(max_generated_strokes, timesteps, 3), dtype=np.float32)
-    y_data = np.zeros(shape=(max_generated_strokes, timesteps, 3), dtype=np.float32)
+    X_data = np.zeros(
+        shape=(max_generated_strokes, timesteps, 3), dtype=np.float32)
+    y_data = np.zeros(
+        shape=(max_generated_strokes, timesteps, 3), dtype=np.float32)
 
     current_timestep = 0
 
@@ -35,7 +40,8 @@ def load_data_predict(timesteps=700, max_samples_per_stroke=200, validation_size
 
         possible_ids_num = len(stroke) - timesteps
         selected_ids_num = min(possible_ids_num, max_samples_per_stroke)
-        selected_ids = np.random.permutation(possible_ids_num)[:selected_ids_num]
+        selected_ids = np.random.permutation(
+            possible_ids_num)[:selected_ids_num]
 
         for stroke_position in selected_ids:
             X_data[current_timestep] = \
@@ -61,9 +67,13 @@ def load_data_recognize(timesteps=700, validation_size=0.3):
 
 
 class LstmModel:
-
-    def __init__(self, checkpoint, timesteps, n_input,
-        n_hidden, n_output, scope_name="scope"):
+    def __init__(self,
+                 checkpoint,
+                 timesteps,
+                 n_input,
+                 n_hidden,
+                 n_output,
+                 scope_name="scope"):
         # Input:
         #   session - TensorFlow Session
         #   checkpoint - str
@@ -85,7 +95,7 @@ class LstmModel:
         self.optimizer_momentum = 0.9
         self.gradients_clip = 10
 
-        self.sess = None # Init an empty TF session
+        self.sess = None  # Init an empty TF session
         self.checkpoint = checkpoint
         self.scope_name = scope_name
         self.n_input = n_input
@@ -97,13 +107,11 @@ class LstmModel:
         self.__initialize_variables()
 
         session_config = tf.ConfigProto(
-            allow_soft_placement = True,
-            gpu_options = tf.GPUOptions(
-                allow_growth = True,
+            allow_soft_placement=True,
+            gpu_options=tf.GPUOptions(
+                allow_growth=True,
                 # To avoid using the totality of the GPU memory
-                per_process_gpu_memory_fraction = 0.7
-            )
-        )
+                per_process_gpu_memory_fraction=0.7))
 
         self.sess = tf.Session(config=session_config)
 
@@ -111,28 +119,33 @@ class LstmModel:
         # self.sess.run(tf.local_variables_initializer())
         self.saver = tf.train.Saver(tf.global_variables())
 
-
     def __del__(self):
         self.sess.close()
-
 
     def __initialize_variables(self):
         with tf.variable_scope(self.scope_name):
             # Input placeholder
-            self.x = tf.placeholder(np.float32, shape=(None, None, self.n_input))
-            self.y_pred = tf.placeholder(tf.float32, (None, None, self.n_input))
+            self.x = tf.placeholder(
+                np.float32, shape=(None, None, self.n_input))
+            self.y_pred = tf.placeholder(tf.float32,
+                                         (None, None, self.n_input))
             self.y_pred_label = tf.reshape(self.y_pred, [-1, self.n_input])
 
             # RNN output node weights and biases
-            self.weights = tf.Variable(tf.random_normal(
-                [self.n_hidden, self.n_output],
-                mean=self.weights_mean,
-                stddev=self.weigths_stddev))
+            self.weights = tf.Variable(
+                tf.random_normal(
+                    [self.n_hidden, self.n_output],
+                    mean=self.weights_mean,
+                    stddev=self.weigths_stddev))
 
-            self.biases = tf.Variable(tf.random_normal([self.n_output],
-                mean=self.weights_mean, stddev=self.weigths_stddev))
+            self.biases = tf.Variable(
+                tf.random_normal(
+                    [self.n_output],
+                    mean=self.weights_mean,
+                    stddev=self.weigths_stddev))
 
-            self.rnn_layer = self.__get_rnn_layer(self.x, self.weights, self.biases)
+            self.rnn_layer = self.__get_rnn_layer(self.x, self.weights,
+                                                  self.biases)
             self.mdn_layer = self.__get_mixture_density_outputs(self.rnn_layer)
             self.loss_op = self.__get_loss(self.mdn_layer)
 
@@ -148,7 +161,6 @@ class LstmModel:
 
             self.train_op = \
                 self.optimizer.apply_gradients(zip(gradients, training_vars))
-
 
     def __get_rnn_layer(self, inputs, weights, biases):
 
@@ -168,7 +180,6 @@ class LstmModel:
 
             return tf.matmul(rnn_out, weights) + biases
 
-
     def __get_mixture_density_outputs(self, inputs):
 
         with tf.variable_scope(self.scope_name):
@@ -182,7 +193,6 @@ class LstmModel:
             rho_out = tf.tanh(rho)
 
             return e_out, pi_out, mean1, mean2, std1_out, std2_out, rho_out
-
 
     def __get_loss(self, mdn_layer):
 
@@ -205,12 +215,13 @@ class LstmModel:
 
             rho_processed = 1.0 - tf.square(self.rho)
 
-            n = tf.div(tf.exp(tf.div(-z, 2.0 * rho_processed)),
-                2.0 * np.pi * tf.multiply(tf.multiply(self.std1, self.std2),
-                    tf.sqrt(rho_processed)))
+            n = tf.div(
+                tf.exp(tf.div(-z, 2.0 * rho_processed)),
+                2.0 * np.pi * tf.multiply(
+                    tf.multiply(self.std1, self.std2), tf.sqrt(rho_processed)))
 
-            reduct_sum_pi_n = tf.reduce_sum(tf.multiply(self.pi, n), axis=1,
-                keep_dims=True)
+            reduct_sum_pi_n = tf.reduce_sum(
+                tf.multiply(self.pi, n), axis=1, keep_dims=True)
 
             e_conditional = tf.multiply(stop_flags, self.e) + \
                 tf.multiply(1.0 - stop_flags, 1.0 - self.e)
@@ -220,7 +231,6 @@ class LstmModel:
 
             return loss
 
-
     def __does_checkpoint_exist(self, checkpoint):
         # Input:
         #   checkpoint - str
@@ -229,14 +239,12 @@ class LstmModel:
         #   exist - bool
         return False
 
-
     def __generate_next_batch(self, X_data, y_data):
 
         # TODO: redesign for more randomness (obviously)
         random_idx = np.random.randint(0, len(X_data) - self.batch_size)
         return X_data[random_idx : random_idx + self.batch_size], \
             y_data[random_idx : random_idx + self.batch_size]
-
 
     def train(self, data_loader):
         current_step = 1
@@ -246,18 +254,24 @@ class LstmModel:
         best_validation_loss = np.inf
 
         print("Loading training and validation data...")
-        xtr, xval, ytr, yval = data_loader(timesteps=self.timesteps,
-            max_samples_per_stroke=25, validation_size=self.batch_size)
+        xtr, xval, ytr, yval = data_loader(
+            timesteps=self.timesteps,
+            max_samples_per_stroke=25,
+            validation_size=self.batch_size)
 
         print("Starting model training with batch size of {}...".format(
-                self.batch_size))
+            self.batch_size))
 
         while True:
             start_time = time.time()
             x_batch, y_batch = self.__generate_next_batch(xtr, ytr)
 
-            _, loss = self.sess.run([self.train_op, self.loss_op],
-                feed_dict={self.x: x_batch, self.y_pred: y_batch})
+            _, loss = self.sess.run(
+                [self.train_op, self.loss_op],
+                feed_dict={
+                    self.x: x_batch,
+                    self.y_pred: y_batch
+                })
 
             iteration_time = int(time.time() - start_time)
 
@@ -265,8 +279,11 @@ class LstmModel:
                 current_step, loss, iteration_time))
 
             if current_step % validation_step == 0:
-                val_loss = self.sess.run(self.loss_op,
-                    feed_dict={self.x: xval, self.y_pred: yval})
+                val_loss = self.sess.run(
+                    self.loss_op, feed_dict={
+                        self.x: xval,
+                        self.y_pred: yval
+                    })
 
                 print("val_loss {:0.10f}".format(val_loss))
 
@@ -283,7 +300,6 @@ class LstmModel:
             else:
                 current_step += 1
 
-
     def __create_point(self, e, mean1, mean2, std1_, std2_, rho):
         max_val = np.float32(1e+5)
 
@@ -292,13 +308,12 @@ class LstmModel:
         std2 = np.minimum(max_val, std2_)
 
         covariance_matrix = np.array([[std1 * std1, std1 * std2 * rho],
-            [std1 * std2 * rho, std2 * std2]])
+                                      [std1 * std2 * rho, std2 * std2]])
 
         mean = np.array([mean1, mean2])
 
         x, y = np.random.multivariate_normal(mean, covariance_matrix)
         return np.array([x, y, np.float32(e > 0.5)])
-
 
     def sample(self, timesteps=700, from_text="", random_seed=1):
         # if not __does_checkpoint_exist(self.checkpoint):
@@ -318,15 +333,15 @@ class LstmModel:
         for sequence_step in tqdm(range(1, timesteps)):
             e, pi, mean1, mean2, std1, std2, rho = self.sess.run(
                 [
-                    self.e, self.pi, self.mean1, self.mean2,
-                    self.std1, self.std2, self.rho
+                    self.e, self.pi, self.mean1, self.mean2, self.std1,
+                    self.std2, self.rho
                 ],
                 feed_dict={self.x: current_point[None, None, ...]})
 
             g = np.random.choice(np.arange(pi.shape[1]), p=pi[0])
 
-            new_point = self.__create_point(e[0, 0], mean1[0, g],
-                mean2[0, g], std1[0, g], std2[0, g], rho[0, g])
+            new_point = self.__create_point(e[0, 0], mean1[0, g], mean2[0, g],
+                                            std1[0, g], std2[0, g], rho[0, g])
 
             current_point = new_point
             output_sequence[sequence_step] = current_point
@@ -346,7 +361,7 @@ def generate_unconditionally(random_seed=1, mode='sample'):
 
     checkpoint = '../data/checkpoints/model-prediction.ckpt'
 
-    # We use a single LSTM layer with 900 hidden cells 
+    # We use a single LSTM layer with 900 hidden cells
     n_hidden = 900
 
     # Input shape: (stop_sign, x, y)
@@ -361,8 +376,13 @@ def generate_unconditionally(random_seed=1, mode='sample'):
     timesteps = np.min([len(x) for x in strokes]) - timesteps_output \
         if mode == 'train' else timesteps_output
 
-    model = LstmModel(checkpoint, timesteps,
-        n_input, n_hidden, n_output, scope_name="lstm_unconditional")
+    model = LstmModel(
+        checkpoint,
+        timesteps,
+        n_input,
+        n_hidden,
+        n_output,
+        scope_name="lstm_unconditional")
 
     if mode == 'train':
         model.train(load_data_predict)
