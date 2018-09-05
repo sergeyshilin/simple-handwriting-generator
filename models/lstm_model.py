@@ -358,7 +358,7 @@ class LstmModel:
         print("Generating training and validation data...")
         xtr, xval, ytr, yval = data_loader(
             timesteps=self.timesteps,
-            max_samples_per_stroke=25,
+            max_samples_per_stroke=50,
             validation_size=0.05)
 
         # print ("Validation set shape: ", xval.shape) <-- debugging
@@ -384,8 +384,8 @@ class LstmModel:
                 current_progress = current_iteration % self.steps_per_epoch + 1
 
                 sys.stdout.write(
-                    "\r epoch: {:>4d}, progress: {:>3d}, loss: {:0.10f}, time {:3d}s>".
-                    format(current_epoch, current_progress, loss,
+                    "\r epoch: {:>4d}, progress: {:>3d}%, loss: {:0.10f}, time {:3d}s".
+                    format(current_epoch + 1, current_progress, loss,
                            iteration_time))
                 sys.stdout.flush()
 
