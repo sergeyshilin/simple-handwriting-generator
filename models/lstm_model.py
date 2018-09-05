@@ -223,13 +223,19 @@ class LstmModel:
             pi, mean1, mean2, std1, std2, rho = tf.split(inputs[:, 1:], 6, 1)
             e = inputs[:, :1]
 
+            self.pi = pi
+            self.std1 = std1
+            self.std2 = std2
+
             e_out = tf.sigmoid(-e)
             pi_out = tf.nn.softmax(pi)
+            mean1_out = mean1
+            mean2_out = mean2
             std1_out = tf.exp(std1)
             std2_out = tf.exp(std2)
             rho_out = tf.tanh(rho)
 
-            return e_out, pi_out, mean1, mean2, std1_out, std2_out, rho_out
+            return [e_out, pi_out, mean1_out, mean2_out, std1_out, std2_out, rho_out]
 
     def _get_loss(self, mdn_layer):
         """Calculate the network loss according to RNN and MDN layer outputs
@@ -242,33 +248,37 @@ class LstmModel:
         """
         eps = 1e-10
 
-        self.e, self.pi, self.mean1, self.mean2, self.std1, self.std2, self.rho = \
-            mdn_layer
+        [e, pi, mean1, mean2, std1, std2, rho] = mdn_layer
+
+        self.e = e
+        self.mean1 = mean1
+        self.mean2 = mean2
+        self.rho = rho
 
         with tf.variable_scope(self.scope_name, reuse=tf.AUTO_REUSE):
             stop_flags, x_coords, y_coords = tf.split(self.y_pred_label, 3, 1)
 
-            x_no_mean = tf.subtract(x_coords, self.mean1)
-            y_no_mean = tf.subtract(y_coords, self.mean2)
-            x_standardized = tf.div(x_no_mean, self.std1)
-            y_standardized = tf.div(y_no_mean, self.std2)
+            x_no_mean = tf.subtract(x_coords, mean1)
+            y_no_mean = tf.subtract(y_coords, mean2)
+            x_standardized = tf.div(x_no_mean, std1)
+            y_standardized = tf.div(y_no_mean, std2)
 
             z = tf.square(x_standardized) + tf.square(y_standardized) - \
-                tf.div(2.0 * tf.multiply(self.rho, tf.multiply(x_no_mean, y_no_mean)), \
-                tf.multiply(self.std1, self.std2))
+                tf.div(2.0 * tf.multiply(rho, tf.multiply(x_no_mean, y_no_mean)), \
+                tf.multiply(std1, std2))
 
-            rho_processed = 1.0 - tf.square(self.rho)
+            rho_processed = 1.0 - tf.square(rho)
 
             n = tf.div(
                 tf.exp(tf.div(-z, 2.0 * rho_processed)),
                 2.0 * np.pi * tf.multiply(
-                    tf.multiply(self.std1, self.std2), tf.sqrt(rho_processed)))
+                    tf.multiply(std1, std2), tf.sqrt(rho_processed)))
 
             reduct_sum_pi_n = tf.reduce_sum(
-                tf.multiply(self.pi, n), axis=1, keep_dims=True)
+                tf.multiply(pi, n), axis=1, keep_dims=True)
 
-            e_conditional = tf.multiply(stop_flags, self.e) + \
-                tf.multiply(1.0 - stop_flags, 1.0 - self.e)
+            e_conditional = tf.multiply(stop_flags, e) + \
+                tf.multiply(1.0 - stop_flags, 1.0 - e)
 
             loss = tf.reduce_mean(-tf.log(tf.maximum(reduct_sum_pi_n, eps)) - \
                 tf.log(tf.maximum(e_conditional, eps)))
@@ -289,28 +299,6 @@ class LstmModel:
         random_idx = np.random.randint(0, len(X_data) - self.batch_size)
         return X_data[random_idx : random_idx + self.batch_size], \
             y_data[random_idx : random_idx + self.batch_size]
-
-    def _create_point(self, e, mean1, mean2, std1, std2, rho):
-        """Sample a stroke point from the network outputs
-
-        Args:
-            e (int): End of stroke probability
-            mean1 (int)
-            mean2 (int)
-            std1_ (int)
-            std2_ (int)
-            rho (int): Correlations of the mixture components 
-
-        Returns:
-            np.array: [self.n_input] shape single stroke point
-        """
-        covariance_matrix = np.array([[std1 * std1, std1 * std2 * rho],
-                                      [std1 * std2 * rho, std2 * std2]])
-
-        mean = np.array([mean1, mean2])
-
-        x, y = np.random.multivariate_normal(mean, covariance_matrix)
-        return np.array([np.float32(e > 0.05), x, y])
 
     def _validate_batch(self, X_data, y_data):
         """Calculate the loss for the validation set
@@ -343,6 +331,28 @@ class LstmModel:
 
         return np.mean(losses)
 
+    def _create_point(self, e, mean1, mean2, std1, std2, rho):
+        """Sample a stroke point from the network outputs
+
+        Args:
+            e (int): End of stroke probability
+            mean1 (int)
+            mean2 (int)
+            std1_ (int)
+            std2_ (int)
+            rho (int): Correlations of the mixture components 
+
+        Returns:
+            np.array: [self.n_input] shape single stroke point
+        """
+        covariance_matrix = np.array([[std1 * std1, std1 * std2 * rho],
+                                      [std1 * std2 * rho, std2 * std2]])
+
+        mean = np.array([mean1, mean2])
+
+        x = np.random.multivariate_normal(mean, covariance_matrix, 1)
+        return np.array([np.float32(e > 0.07), x[0][0], x[0][1]])
+
     def train(self, data_loader):
         """Train the network on the handwriting data
 
@@ -350,7 +360,7 @@ class LstmModel:
             data_loader (void): a data loading function callback
         """
         loss_degradation_num = 0
-        validation_best_steps = 3
+        validation_best_steps = 10
         best_validation_loss = np.inf
 
         print("Generating training and validation data...")
@@ -358,8 +368,6 @@ class LstmModel:
             timesteps=self.timesteps,
             max_samples_per_stroke=50,
             validation_size=0.05)
-
-        # print ("Validation set shape: ", xval.shape) <-- debugging
 
         print("Starting model training with batch size of {}...".format(
             self.batch_size))
@@ -416,6 +424,8 @@ class LstmModel:
         Raises:
             FileNotFoundError: TensorFlow model checkpoint does not exist
         """
+        sample_bias = 0.15
+
         if not tf.train.checkpoint_exists(self.checkpoint):
             raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT),
                                     self.checkpoint)
@@ -437,10 +447,17 @@ class LstmModel:
                 ],
                 feed_dict={self.x: current_point[None, None, ...]})
 
-            g = np.random.choice(np.arange(pi.shape[1]), p=pi[0])
+            # Biased sampling
+            std1 = np.exp(std1 - sample_bias)
+            std2 = np.exp(std2 - sample_bias)
+            pi_ = pi * (1.0 + sample_bias)
+            pi = np.zeros_like(pi_)
+            pi[0] = np.exp(pi_[0]) / np.sum(np.exp(pi_[0]), axis=0)
 
-            new_point = self._create_point(e[0, 0], mean1[0, g], mean2[0, g],
-                                           std1[0, g], std2[0, g], rho[0, g])
+            pi_idx = np.random.choice(np.arange(pi.shape[1]), p=pi[0])
+            new_point = self._create_point(e[0, 0], mean1[0, pi_idx], 
+                                           mean2[0, pi_idx], std1[0, pi_idx],
+                                           std2[0, pi_idx], rho[0, pi_idx])
 
             current_point = new_point
             output_sequence[sequence_step] = current_point
@@ -503,7 +520,7 @@ def generate_conditionally(text="welcome to lyrebird", random_seed=1):
     """
     checkpoint_file = "../data/checkpoints/model-synthesis.ckpt"
 
-    return stroke
+    return np.asarray([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
 
 
 def recognize_stroke(stroke):
