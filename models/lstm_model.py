@@ -192,7 +192,7 @@ class LstmModel:
             mdn_layer
 
         with tf.variable_scope(self.scope_name):
-            x_coords, y_coords, stop_flags = tf.split(self.y_pred_label, 3, 1)
+            stop_flags, x_coords, y_coords = tf.split(self.y_pred_label, 3, 1)
 
             x_no_mean = tf.subtract(x_coords, self.mean1)
             y_no_mean = tf.subtract(y_coords, self.mean2)
