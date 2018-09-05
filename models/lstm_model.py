@@ -13,8 +13,8 @@ from tensorflow.contrib import rnn
 from sklearn.model_selection import train_test_split
 
 # >>> Read global data
-strokes = np.load('../data/strokes.npy', encoding='bytes')
-with open('../data/sentences.txt') as f:
+strokes = np.load("../data/strokes.npy", encoding="bytes")
+with open("../data/sentences.txt") as f:
     texts = f.readlines()
 # <<< Read global data
 
@@ -61,8 +61,6 @@ def load_data_predict(timesteps=700,
             y_data[current_timestep] = \
                 stroke[stroke_position + 1 : timesteps + stroke_position + 1]
             current_timestep += 1
-
-    # TODO: normalize [x, y] to mean=0, stddev=1
 
     return train_test_split(X_data, y_data, test_size=validation_size)
 
@@ -312,7 +310,7 @@ class LstmModel:
         mean = np.array([mean1, mean2])
 
         x, y = np.random.multivariate_normal(mean, covariance_matrix)
-        return np.array([np.float32(e > 0.01), x, y])
+        return np.array([np.float32(e > 0.05), x, y])
 
     def _validate_batch(self, X_data, y_data):
         """Calculate the loss for the validation set
@@ -365,6 +363,9 @@ class LstmModel:
 
         print("Starting model training with batch size of {}...".format(
             self.batch_size))
+
+        if tf.train.checkpoint_exists(self.checkpoint):
+            self.saver.restore(self.sess, self.checkpoint)
 
         for current_epoch in range(self.epochs):
             start_time = time.time()
@@ -450,7 +451,7 @@ class LstmModel:
         return output_sequence
 
 
-def generate_unconditionally(random_seed=1, mode='sample'):
+def generate_unconditionally(random_seed=1, mode="sample"):
     """Summary
 
     Args:
@@ -460,7 +461,7 @@ def generate_unconditionally(random_seed=1, mode='sample'):
     Returns:
         np.array: Generated stroke with the shape (timesteps, n_input)
     """
-    checkpoint = '../data/checkpoints/model-prediction.ckpt'
+    checkpoint = "../data/checkpoints/model-prediction.ckpt"
 
     # We use a single LSTM layer with 900 hidden cells
     n_hidden = 900
@@ -474,7 +475,7 @@ def generate_unconditionally(random_seed=1, mode='sample'):
     # Take the minimum length over all sequences, in this case
     # we will not get rid of any stroke
     timesteps = np.min([len(x) for x in strokes]) - timesteps_output \
-        if mode == 'train' else timesteps_output
+        if mode == "train" else timesteps_output
 
     model = LstmModel(
         checkpoint,
@@ -483,14 +484,14 @@ def generate_unconditionally(random_seed=1, mode='sample'):
         n_hidden,
         scope_name="lstm_unconditional")
 
-    if mode == 'train':
+    if mode == "train":
         model.train(load_data_predict)
         return None
     else:
         return model.sample(timesteps=700, random_seed=random_seed)
 
 
-def generate_conditionally(text='welcome to lyrebird', random_seed=1):
+def generate_conditionally(text="welcome to lyrebird", random_seed=1):
     """
 
     Args:
@@ -500,7 +501,7 @@ def generate_conditionally(text='welcome to lyrebird', random_seed=1):
     Returns:
         np.array: stroke - numpy 2D-array (T x 3)
     """
-    checkpoint_file = '../data/checkpoints/model-synthesis.ckpt'
+    checkpoint_file = "../data/checkpoints/model-synthesis.ckpt"
 
     return stroke
 
@@ -514,6 +515,6 @@ def recognize_stroke(stroke):
     Returns:
         str: Recognized text
     """
-    checkpoint_file = '../data/checkpoints/model-recognition.ckpt'
+    checkpoint_file = "../data/checkpoints/model-recognition.ckpt"
 
-    return 'welcome to lyrebird'
+    return "welcome to lyrebird"
