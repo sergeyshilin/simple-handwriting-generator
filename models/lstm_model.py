@@ -172,8 +172,8 @@ class LstmModel:
     def __get_mixture_density_outputs(self, inputs):
 
         with tf.variable_scope(self.scope_name):
-            pi, mean1, mean2, std1, std2, rho = tf.split(inputs[:, :-1], 6, 1)
-            e = inputs[:, -1:]
+            pi, mean1, mean2, std1, std2, rho = tf.split(inputs[:, 1:], 6, 1)
+            e = inputs[:, :-1]
 
             e_out = tf.sigmoid(-e)
             pi_out = tf.nn.softmax(pi)
@@ -284,18 +284,60 @@ class LstmModel:
                 current_step += 1
 
 
-    def sample(self):
+    def __create_point(self, e, mean1, mean2, std1_, std2_, rho):
+        max_val = np.float32(1e+5)
+
+        # There are huge numbers sometimes and numpy returns inf when casting
+        std1 = np.minimum(max_val, std1_)
+        std2 = np.minimum(max_val, std2_)
+
+        covariance_matrix = np.array([[std1 * std1, std1 * std2 * rho],
+            [std1 * std2 * rho, std2 * std2]])
+
+        mean = np.array([mean1, mean2])
+
+        x, y = np.random.multivariate_normal(mean, covariance_matrix)
+        return np.array([x, y, np.float32(e > 0.5)])
+
+
+    def sample(self, timesteps=700, from_text="", random_seed=1):
         # if not __does_checkpoint_exist(self.checkpoint):
         #     # Create the checkpoint first of all or raise an exception
         #     pass
         # else:
 
+        np.random.seed(random_seed)
+
         self.saver.restore(self.sess, self.checkpoint)
+        output_sequence = np.zeros((timesteps, 3))
 
-        starting_step = np.array([0., 0., 1.])
+        # initialize with the point at (0, 0)
+        current_point = np.array([1.0, 0., 0.0], dtype=np.float32)
+        output_sequence[0] = current_point
+
+        for sequence_step in tqdm(range(1, timesteps)):
+            e, pi, mean1, mean2, std1, std2, rho = self.sess.run(
+                [
+                    self.e, self.pi, self.mean1, self.mean2,
+                    self.std1, self.std2, self.rho
+                ],
+                feed_dict={self.x: current_point[None, None, ...]})
+
+            g = np.random.choice(np.arange(pi.shape[1]), p=pi[0])
+
+            new_point = self.__create_point(e[0, 0], mean1[0, g],
+                mean2[0, g], std1[0, g], std2[0, g], rho[0, g])
+
+            current_point = new_point
+            output_sequence[sequence_step] = current_point
+
+        # end of stroke
+        output_sequence[-1, 0] = 1.0
+
+        return output_sequence
 
 
-def generate_unconditionally(random_seed=1):
+def generate_unconditionally(random_seed=1, mode='sample'):
     # Input:
     #   random_seed - integer
 
@@ -307,7 +349,7 @@ def generate_unconditionally(random_seed=1):
     # We use a single LSTM layer with 900 hidden cells 
     n_hidden = 900
 
-    # Input shape: (x, y, stop_sign)
+    # Input shape: (stop_sign, x, y)
     n_input = 3
     n_output = n_input
 
@@ -316,14 +358,16 @@ def generate_unconditionally(random_seed=1):
 
     # Take the minimum length over all sequences, in this case
     # we will not get rid of any stroke
-    timesteps = np.min([len(x) for x in strokes]) - timesteps_output
+    timesteps = np.min([len(x) for x in strokes]) - timesteps_output \
+        if mode == 'train' else timesteps_output
 
     model = LstmModel(checkpoint, timesteps,
         n_input, n_hidden, n_output, scope_name="lstm_unconditional")
 
-    # model.sample()
-
-    model.train(load_data_predict)
+    if mode == 'train':
+        model.train(load_data_predict)
+    else:
+        return model.sample(timesteps=700, random_seed=random_seed)
 
     return None
 
