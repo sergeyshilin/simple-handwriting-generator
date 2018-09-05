@@ -101,7 +101,8 @@ class LstmModel:
             scope_name (str, optional): Name of the TensorFlow variables scope
         """
 
-        self.training_steps = 10000
+        self.epochs = 1000
+        self.steps_per_epoch = 100
         self.batch_size = 64
         self.weigths_stddev = 0.075
         self.weights_mean = 0
@@ -142,7 +143,7 @@ class LstmModel:
     def _initialize_variables(self):
         """Initialize tf Variables and operations
         """
-        with tf.variable_scope(self.scope_name):
+        with tf.variable_scope(self.scope_name, reuse=tf.AUTO_REUSE):
             # Input placeholder
             self.x = tf.placeholder(
                 np.float32, shape=(None, None, self.n_input))
@@ -163,7 +164,7 @@ class LstmModel:
                     stddev=self.weigths_stddev))
 
             self.rnn_layer = self._get_rnn_layer(self.x, self.weights,
-                                                  self.biases)
+                                                 self.biases)
             self.mdn_layer = self._get_mixture_density_outputs(self.rnn_layer)
             self.loss_op = self._get_loss(self.mdn_layer)
 
@@ -191,7 +192,7 @@ class LstmModel:
         Returns:
             tf.Tensor: RNN layer
         """
-        with tf.variable_scope(self.scope_name):
+        with tf.variable_scope(self.scope_name, reuse=tf.AUTO_REUSE):
             rnn_x = [
                 tf.squeeze(input_, [1]) \
                     for input_ in tf.split(inputs, self.timesteps, 1)
@@ -220,7 +221,7 @@ class LstmModel:
         Returns:
             6 x tf.Tensor: 
         """
-        with tf.variable_scope(self.scope_name):
+        with tf.variable_scope(self.scope_name, reuse=tf.AUTO_REUSE):
             pi, mean1, mean2, std1, std2, rho = tf.split(inputs[:, 1:], 6, 1)
             e = inputs[:, :1]
 
@@ -246,7 +247,7 @@ class LstmModel:
         self.e, self.pi, self.mean1, self.mean2, self.std1, self.std2, self.rho = \
             mdn_layer
 
-        with tf.variable_scope(self.scope_name):
+        with tf.variable_scope(self.scope_name, reuse=tf.AUTO_REUSE):
             stop_flags, x_coords, y_coords = tf.split(self.y_pred_label, 3, 1)
 
             x_no_mean = tf.subtract(x_coords, self.mean1)
@@ -291,7 +292,7 @@ class LstmModel:
         return X_data[random_idx : random_idx + self.batch_size], \
             y_data[random_idx : random_idx + self.batch_size]
 
-    def _create_point(self, e, mean1, mean2, std1_, std2_, rho):
+    def _create_point(self, e, mean1, mean2, std1, std2, rho):
         """Sample a stroke point from the network outputs
 
         Args:
@@ -305,19 +306,44 @@ class LstmModel:
         Returns:
             np.array: [self.n_input] shape single stroke point
         """
-        max_val = np.float32(1e+5)
-
-        # There are huge numbers sometimes and numpy returns inf when casting
-        std1 = np.minimum(max_val, std1_)
-        std2 = np.minimum(max_val, std2_)
-
         covariance_matrix = np.array([[std1 * std1, std1 * std2 * rho],
                                       [std1 * std2 * rho, std2 * std2]])
 
         mean = np.array([mean1, mean2])
 
         x, y = np.random.multivariate_normal(mean, covariance_matrix)
-        return np.array([x, y, np.float32(e > 0.5)])
+        return np.array([np.float32(e > 0.01), x, y])
+
+    def _validate_batch(self, X_data, y_data):
+        """Calculate the loss for the validation set
+        
+        Args:
+            X_data (np.array)
+            y_data (np.array)
+        
+        Returns:
+            float: validation loss
+        """
+        num_iterations = len(X_data) // self.batch_size
+        losses = np.zeros((num_iterations), dtype=np.float32)
+
+        for batch_id in range(num_iterations):
+            id_start = batch_id * self.batch_size
+            id_end = id_start + self.batch_size
+
+            x_batch = X_data[id_start:id_end]
+            y_batch = y_data[id_start:id_end]
+
+            loss = self.sess.run(
+                self.loss_op,
+                feed_dict={
+                    self.x: x_batch,
+                    self.y_pred: y_batch
+                })
+
+            losses[batch_id] = loss
+
+        return np.mean(losses)
 
     def train(self, data_loader):
         """Train the network on the handwriting data
@@ -325,58 +351,56 @@ class LstmModel:
         Args:
             data_loader (void): a data loading function callback
         """
-        current_step = 1
-        loss_decreases_num = 0
-        validation_step = 100
-        validation_best_steps = 10
+        loss_degradation_num = 0
+        validation_best_steps = 3
         best_validation_loss = np.inf
 
-        print("Loading training and validation data...")
+        print("Generating training and validation data...")
         xtr, xval, ytr, yval = data_loader(
             timesteps=self.timesteps,
             max_samples_per_stroke=25,
-            validation_size=self.batch_size)
+            validation_size=0.05)
+
+        # print ("Validation set shape: ", xval.shape) <-- debugging
 
         print("Starting model training with batch size of {}...".format(
             self.batch_size))
 
-        while True:
+        for current_epoch in range(self.epochs):
             start_time = time.time()
-            x_batch, y_batch = self._generate_next_batch(xtr, ytr)
 
-            _, loss = self.sess.run(
-                [self.train_op, self.loss_op],
-                feed_dict={
-                    self.x: x_batch,
-                    self.y_pred: y_batch
-                })
+            for current_iteration in range(self.steps_per_epoch):
 
-            iteration_time = int(time.time() - start_time)
+                x_batch, y_batch = self._generate_next_batch(xtr, ytr)
 
-            print("iteration {:>4}: loss {:0.10f} time {:3d}s".format(
-                current_step, loss, iteration_time))
-
-            if current_step % validation_step == 0:
-                val_loss = self.sess.run(
-                    self.loss_op, feed_dict={
-                        self.x: xval,
-                        self.y_pred: yval
+                _, loss = self.sess.run(
+                    [self.train_op, self.loss_op],
+                    feed_dict={
+                        self.x: x_batch,
+                        self.y_pred: y_batch
                     })
 
-                print("val_loss {:0.10f}".format(val_loss))
+                iteration_time = int(time.time() - start_time)
+                current_progress = current_iteration % self.steps_per_epoch + 1
 
-                if val_loss < best_validation_loss:
-                    best_validation_loss = val_loss
-                    loss_decreases_num = 0
-                    self.saver.save(self.sess, self.checkpoint)
-                else:
-                    loss_decreases_num += 1
+                sys.stdout.write(
+                    "\r epoch: {:>4d}, progress: {:>3d}, loss: {:0.10f}, time {:3d}s>".
+                    format(current_epoch, current_progress, loss,
+                           iteration_time))
+                sys.stdout.flush()
 
-            if current_step == self.training_steps or \
-                    loss_decreases_num == validation_best_steps:
-                break
+            val_loss = self._validate_batch(xval, yval)
+            sys.stdout.write(" | val_loss: {:0.10f}   \n".format(val_loss))
+
+            if val_loss < best_validation_loss:
+                best_validation_loss = val_loss
+                loss_degradation_num = 0
+                self.saver.save(self.sess, self.checkpoint)
             else:
-                current_step += 1
+                loss_degradation_num += 1
+
+            if loss_degradation_num == validation_best_steps:
+                break
 
     def sample(self, timesteps=700, random_seed=1):
         """Generate a random stroke from a (0, 0) starting point
@@ -398,7 +422,7 @@ class LstmModel:
         np.random.seed(random_seed)
 
         self.saver.restore(self.sess, self.checkpoint)
-        output_sequence = np.zeros((timesteps, 3))
+        output_sequence = np.zeros((timesteps, 3), dtype=np.float32)
 
         # initialize with the point at (0, 0)
         current_point = np.array([1.0, 0., 0.0], dtype=np.float32)
@@ -415,7 +439,7 @@ class LstmModel:
             g = np.random.choice(np.arange(pi.shape[1]), p=pi[0])
 
             new_point = self._create_point(e[0, 0], mean1[0, g], mean2[0, g],
-                                            std1[0, g], std2[0, g], rho[0, g])
+                                           std1[0, g], std2[0, g], rho[0, g])
 
             current_point = new_point
             output_sequence[sequence_step] = current_point
