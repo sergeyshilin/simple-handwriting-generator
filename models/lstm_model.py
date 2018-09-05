@@ -1,4 +1,8 @@
+from __future__ import print_function
+
+import os
 import sys
+import errno
 import numpy as np
 import time
 from tqdm import tqdm
@@ -18,9 +22,16 @@ with open('../data/sentences.txt') as f:
 def load_data_predict(timesteps=700,
                       max_samples_per_stroke=200,
                       validation_size=0.3):
-    # Input:
-    #   timesteps - int
-    #   validation_size - float or int
+    """Generates training and validation datasets using the global strokes data
+
+    Args:
+        timesteps (int, optional): Length of the data sequence (stroke)
+        max_samples_per_stroke (int, optional)
+        validation_size (float or int, optional): Train-test split ratio (float) or a test set size (int)
+
+    Returns:
+        4 arrays: X_train, X_test, y_train, y_test
+    """
 
     max_generated_strokes = np.sum([
         min(len(stroke) - timesteps, max_samples_per_stroke)
@@ -57,33 +68,39 @@ def load_data_predict(timesteps=700,
 
 
 def load_data_recognize(timesteps=700, validation_size=0.3):
-    # Input:
-    #   timesteps - int
-    #   validation_split - float
+    """Generates training and validation data for handwriting prediction purposes
 
-    # The function to read strokes and predtct text
+    Args:
+        timesteps (int, optional): Length of the data sequence
+        validation_size (float or int, optional): Train-test split ratio (float) or a test set size (int)
 
-    return None
+    Returns:
+        4 arrays: X_train, X_test, y_train, y_test
+    """
+    pass
 
 
 class LstmModel:
+    """LSTM-based RNN model with a Mixture Density Outputs layer
+    """
+
     def __init__(self,
                  checkpoint,
                  timesteps,
                  n_input,
                  n_hidden,
-                 n_output,
                  scope_name="scope"):
-        # Input:
-        #   session - TensorFlow Session
-        #   checkpoint - str
-        #   rnn - TensorFlow RNN Layer loader
-        #   timesteps  - int
-        #   n_input    - int
-        #   n_hidden   - int
-        #   n_output   - int
+        """Summary
 
-        # The amount of sequences fed to the network while training
+        Args:
+            checkpoint (str): Model checkpoint filepath
+            timesteps (int): Length of the data sequence (stroke)
+            n_input (int): Size of the input stroke point, [stop_sign, x, y]
+            n_hidden (int): Number of cells in the RNN layer
+            n_output (int): Size of the last output layer
+            scope_name (str, optional): Name of the TensorFlow variables scope
+        """
+
         self.training_steps = 10000
         self.batch_size = 64
         self.weigths_stddev = 0.075
@@ -95,16 +112,14 @@ class LstmModel:
         self.optimizer_momentum = 0.9
         self.gradients_clip = 10
 
-        self.sess = None  # Init an empty TF session
         self.checkpoint = checkpoint
         self.scope_name = scope_name
         self.n_input = n_input
         self.n_hidden = n_hidden
         self.timesteps = timesteps
-        # pi, mean1, mean2, std1, std2, rho + "end of stroke"
-        self.n_output = self.mixtures * 6 + 1
+        self.n_output = self.mixtures * 6 + 1  # pi, mean1, mean2, std1, std2, rho + "end of stroke"
 
-        self.__initialize_variables()
+        self._initialize_variables()
 
         session_config = tf.ConfigProto(
             allow_soft_placement=True,
@@ -120,18 +135,21 @@ class LstmModel:
         self.saver = tf.train.Saver(tf.global_variables())
 
     def __del__(self):
+        """TensorFlow Session destructor
+        """
         self.sess.close()
 
-    def __initialize_variables(self):
+    def _initialize_variables(self):
+        """Initialize tf Variables and operations
+        """
         with tf.variable_scope(self.scope_name):
             # Input placeholder
             self.x = tf.placeholder(
                 np.float32, shape=(None, None, self.n_input))
-            self.y_pred = tf.placeholder(tf.float32,
-                                         (None, None, self.n_input))
+            self.y_pred = tf.placeholder(
+                tf.float32, shape=(None, None, self.n_input))
             self.y_pred_label = tf.reshape(self.y_pred, [-1, self.n_input])
 
-            # RNN output node weights and biases
             self.weights = tf.Variable(
                 tf.random_normal(
                     [self.n_hidden, self.n_output],
@@ -144,10 +162,10 @@ class LstmModel:
                     mean=self.weights_mean,
                     stddev=self.weigths_stddev))
 
-            self.rnn_layer = self.__get_rnn_layer(self.x, self.weights,
+            self.rnn_layer = self._get_rnn_layer(self.x, self.weights,
                                                   self.biases)
-            self.mdn_layer = self.__get_mixture_density_outputs(self.rnn_layer)
-            self.loss_op = self.__get_loss(self.mdn_layer)
+            self.mdn_layer = self._get_mixture_density_outputs(self.rnn_layer)
+            self.loss_op = self._get_loss(self.mdn_layer)
 
             self.optimizer = tf.train.RMSPropOptimizer(
                 learning_rate=self.learning_rate,
@@ -162,8 +180,17 @@ class LstmModel:
             self.train_op = \
                 self.optimizer.apply_gradients(zip(gradients, training_vars))
 
-    def __get_rnn_layer(self, inputs, weights, biases):
+    def _get_rnn_layer(self, inputs, weights, biases):
+        """Get the RNN layer with the structure of LSTM cells
 
+        Args:
+            inputs (tf.Tensor)
+            weights (tf.Variable)
+            biases (tv.Variable)
+
+        Returns:
+            tf.Tensor: RNN layer
+        """
         with tf.variable_scope(self.scope_name):
             rnn_x = [
                 tf.squeeze(input_, [1]) \
@@ -180,8 +207,19 @@ class LstmModel:
 
             return tf.matmul(rnn_out, weights) + biases
 
-    def __get_mixture_density_outputs(self, inputs):
+    def _get_mixture_density_outputs(self, inputs):
+        """Use the outputs of a neural network to parameterise a mixture distribution
 
+        e: end of stroke probability
+        pi: mixture weights
+        rho: correlations of the mixture components
+
+        Args:
+            inputs (tf.Tensor): RNN layer
+
+        Returns:
+            6 x tf.Tensor: 
+        """
         with tf.variable_scope(self.scope_name):
             pi, mean1, mean2, std1, std2, rho = tf.split(inputs[:, 1:], 6, 1)
             e = inputs[:, :1]
@@ -194,8 +232,15 @@ class LstmModel:
 
             return e_out, pi_out, mean1, mean2, std1_out, std2_out, rho_out
 
-    def __get_loss(self, mdn_layer):
+    def _get_loss(self, mdn_layer):
+        """Calculate the network loss according to RNN and MDN layer outputs
 
+        Args:
+            mdn_layer (6 x tf.Tensor): result of the Mixture Density Outputs layer
+
+        Returns:
+            tf.Tensor: Reduced tf Tensor
+        """
         eps = 1e-10
 
         self.e, self.pi, self.mean1, self.mean2, self.std1, self.std2, self.rho = \
@@ -231,22 +276,55 @@ class LstmModel:
 
             return loss
 
-    def __does_checkpoint_exist(self, checkpoint):
-        # Input:
-        #   checkpoint - str
+    def _generate_next_batch(self, X_data, y_data):
+        """Generate next batch of training data
 
-        # Output:
-        #   exist - bool
-        return False
+        Args:
+            X_data (np.array)
+            y_data (np.array)
 
-    def __generate_next_batch(self, X_data, y_data):
-
+        Returns:
+            np.array: A batch of size `self.batch_size`
+        """
         # TODO: redesign for more randomness (obviously)
         random_idx = np.random.randint(0, len(X_data) - self.batch_size)
         return X_data[random_idx : random_idx + self.batch_size], \
             y_data[random_idx : random_idx + self.batch_size]
 
+    def _create_point(self, e, mean1, mean2, std1_, std2_, rho):
+        """Sample a stroke point from the network outputs
+
+        Args:
+            e (int): End of stroke probability
+            mean1 (int)
+            mean2 (int)
+            std1_ (int)
+            std2_ (int)
+            rho (int): Correlations of the mixture components 
+
+        Returns:
+            np.array: [self.n_input] shape single stroke point
+        """
+        max_val = np.float32(1e+5)
+
+        # There are huge numbers sometimes and numpy returns inf when casting
+        std1 = np.minimum(max_val, std1_)
+        std2 = np.minimum(max_val, std2_)
+
+        covariance_matrix = np.array([[std1 * std1, std1 * std2 * rho],
+                                      [std1 * std2 * rho, std2 * std2]])
+
+        mean = np.array([mean1, mean2])
+
+        x, y = np.random.multivariate_normal(mean, covariance_matrix)
+        return np.array([x, y, np.float32(e > 0.5)])
+
     def train(self, data_loader):
+        """Train the network on the handwriting data
+
+        Args:
+            data_loader (void): a data loading function callback
+        """
         current_step = 1
         loss_decreases_num = 0
         validation_step = 100
@@ -264,7 +342,7 @@ class LstmModel:
 
         while True:
             start_time = time.time()
-            x_batch, y_batch = self.__generate_next_batch(xtr, ytr)
+            x_batch, y_batch = self._generate_next_batch(xtr, ytr)
 
             _, loss = self.sess.run(
                 [self.train_op, self.loss_op],
@@ -300,26 +378,22 @@ class LstmModel:
             else:
                 current_step += 1
 
-    def __create_point(self, e, mean1, mean2, std1_, std2_, rho):
-        max_val = np.float32(1e+5)
+    def sample(self, timesteps=700, random_seed=1):
+        """Generate a random stroke from a (0, 0) starting point
 
-        # There are huge numbers sometimes and numpy returns inf when casting
-        std1 = np.minimum(max_val, std1_)
-        std2 = np.minimum(max_val, std2_)
+        Args:
+            timesteps (int, optional): Length of the data sequence (stroke)
+            random_seed (int, optional)
 
-        covariance_matrix = np.array([[std1 * std1, std1 * std2 * rho],
-                                      [std1 * std2 * rho, std2 * std2]])
+        Returns:
+            np.array: sampled stroke of a shape (timesteps, n_input) 
 
-        mean = np.array([mean1, mean2])
-
-        x, y = np.random.multivariate_normal(mean, covariance_matrix)
-        return np.array([x, y, np.float32(e > 0.5)])
-
-    def sample(self, timesteps=700, from_text="", random_seed=1):
-        # if not __does_checkpoint_exist(self.checkpoint):
-        #     # Create the checkpoint first of all or raise an exception
-        #     pass
-        # else:
+        Raises:
+            FileNotFoundError: TensorFlow model checkpoint does not exist
+        """
+        if not tf.train.checkpoint_exists(self.checkpoint):
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT),
+                                    self.checkpoint)
 
         np.random.seed(random_seed)
 
@@ -340,7 +414,7 @@ class LstmModel:
 
             g = np.random.choice(np.arange(pi.shape[1]), p=pi[0])
 
-            new_point = self.__create_point(e[0, 0], mean1[0, g], mean2[0, g],
+            new_point = self._create_point(e[0, 0], mean1[0, g], mean2[0, g],
                                             std1[0, g], std2[0, g], rho[0, g])
 
             current_point = new_point
@@ -353,12 +427,15 @@ class LstmModel:
 
 
 def generate_unconditionally(random_seed=1, mode='sample'):
-    # Input:
-    #   random_seed - integer
+    """Summary
 
-    # Output:
-    #   stroke - numpy 2D-array (T x 3)
+    Args:
+        random_seed (int, optional)
+        mode (str, optional): Either `sample` or `train`
 
+    Returns:
+        np.array: Generated stroke with the shape (timesteps, n_input)
+    """
     checkpoint = '../data/checkpoints/model-prediction.ckpt'
 
     # We use a single LSTM layer with 900 hidden cells
@@ -366,7 +443,6 @@ def generate_unconditionally(random_seed=1, mode='sample'):
 
     # Input shape: (stop_sign, x, y)
     n_input = 3
-    n_output = n_input
 
     # We want to output only one (next) point per time
     timesteps_output = 1
@@ -381,37 +457,39 @@ def generate_unconditionally(random_seed=1, mode='sample'):
         timesteps,
         n_input,
         n_hidden,
-        n_output,
         scope_name="lstm_unconditional")
 
     if mode == 'train':
         model.train(load_data_predict)
+        return None
     else:
         return model.sample(timesteps=700, random_seed=random_seed)
 
-    return None
-
 
 def generate_conditionally(text='welcome to lyrebird', random_seed=1):
-    # Input:
-    #   text - str
-    #   random_seed - integer
+    """
 
-    # Output:
-    #   stroke - numpy 2D-array (T x 3)
+    Args:
+        text (str, optional): Description
+        random_seed (int, optional): Description
 
+    Returns:
+        np.array: stroke - numpy 2D-array (T x 3)
+    """
     checkpoint_file = '../data/checkpoints/model-synthesis.ckpt'
 
     return stroke
 
 
 def recognize_stroke(stroke):
-    # Input:
-    #   stroke - numpy 2D-array (T x 3)
+    """
 
-    # Output:
-    #   text - str
+    Args:
+        stroke (np.array): numpy 2D-array (T x 3)
 
+    Returns:
+        str: Recognized text
+    """
     checkpoint_file = '../data/checkpoints/model-recognition.ckpt'
 
     return 'welcome to lyrebird'
