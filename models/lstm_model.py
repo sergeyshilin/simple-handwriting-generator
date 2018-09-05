@@ -173,7 +173,7 @@ class LstmModel:
 
         with tf.variable_scope(self.scope_name):
             pi, mean1, mean2, std1, std2, rho = tf.split(inputs[:, 1:], 6, 1)
-            e = inputs[:, :-1]
+            e = inputs[:, :1]
 
             e_out = tf.sigmoid(-e)
             pi_out = tf.nn.softmax(pi)
